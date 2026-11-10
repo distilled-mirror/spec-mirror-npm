@@ -1,0 +1,983 @@
+paths:
+  /-/package/{package}/trust:
+    get:
+      tags:
+        - Trust
+      summary: Get all trusted publisher configurations for package
+      description: |
+        Retrieve all trusted publisher configurations for a package.
+
+        This endpoint allows users with write permission to the package to view all existing trusted publisher
+        configurations that have been set up for OIDC token exchange for their package.
+
+        Each configuration's `permissions` array lists its allowed actions. The `manageDistTags`
+        permission is present only when dist-tag access has been explicitly enabled for that configuration.
+
+        ## Configuration Structure
+
+        The structure of the payload follows a specific design. Each trusted provider has their own unique set of claims.
+        In order to keep things clear and consistent, the properties to create a provider match the claims structure.
+        The caveat is when a claim requires partial matching through parsing.
+
+        - All configurations MUST include a `type`, `claims` object, and `permissions` array
+        - Top-level "claims" MUST match the cloud provider's exact claim properties
+        - Claims MAY use exact string matching when supported
+        - Claims MAY use an object structure to define one or multiple partial matching rules
+        - Partial matching properties MUST be defined and documented by this API specification
+        - This documentation SHALL only provide matches for specifically defined claim items
+
+        ## Requirements
+        - Package MUST exist
+        - User MUST have write permission to the package
+        - MUST have 2FA enabled on their account
+        - User MUST be authenticated
+
+      operationId: getTrustedPublishers
+      parameters:
+        - name: package
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Name of the npm package, url-encoded
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            pattern: "^Bearer .+"
+          description: |
+            Authentication header. Supports both Bearer authentication.
+
+            **Formats:**
+            - `Bearer <token>` - npm access token or granular access token
+
+            **Accepted token types:**
+            - npm access token (traditional user token)
+        - name: npm-otp
+          in: header
+          required: true
+          schema:
+            type: string
+          description: |
+            One-time password for two-factor authentication. Always required for this endpoint.
+
+            When not provided for users with 2FA enabled, the API responds with 2FA polling payload.
+      security:
+        - npmAccessToken: []
+        - granularAccessToken: []
+      responses:
+        "200":
+          description: "Trusted publisher configurations retrieved successfully"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OidcConfigs"
+              examples:
+                empty:
+                  summary: No configurations
+                  value: []
+                github:
+                  summary: GitHub Actions configuration
+                  value:
+                    - id: "12345678-1234-1234-1234-123456789abc"
+                      type: "github"
+                      claims:
+                        repository: "my-org/my-package"
+                        workflow_ref:
+                          file: "publish.yml"
+                        environment: "production"
+                      permissions:
+                        - "createPackage"
+                        - "createStagedPackage"
+                gitlab:
+                  summary: GitLab CI configuration
+                  value:
+                    - id: "87654321-4321-4321-4321-abcdef123456"
+                      type: "gitlab"
+                      claims:
+                        project_path: "my-group/my-package"
+                        ci_config_ref_uri:
+                          file: ".gitlab-ci.yml"
+                        environment: "production"
+                      permissions:
+                        - "createPackage"
+                        - "createStagedPackage"
+                circleci:
+                  summary: CircleCI configuration
+                  value:
+                    - id: "e792f093-7302-4330-8d50-27d7acddc87e"
+                      type: "circleci"
+                      claims:
+                        oidc.circleci.com/org-id: "94b40e60-cfd5-486f-a04b-507abf27a83d"
+                        oidc.circleci.com/project-id: "ff4d0d0d-5033-48c5-81e6-7c14a4715837"
+                        oidc.circleci.com/pipeline-definition-id: "c959a6e7-5b83-4bc1-b46f-37bf13513490"
+                        oidc.circleci.com/context-ids:
+                          - "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                        oidc.circleci.com/vcs-origin: "github.com/myorg/myrepo"
+                      permissions:
+                        - "createPackage"
+                        - "createStagedPackage"
+        "401":
+          description: Unauthorized - missing or invalid authentication / OTP
+          headers:
+            npm-notice:
+              description: |
+                Notice header sent when 2FA is enabled and web auth headers are not present.
+                Contains URL for WebAuthn security key authentication.
+              schema:
+                type: string
+              example: "Open https://www.npmjs.com/login/<uuid> to use your security key for authentication"
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    description: Error response for missing authentication or OTP
+                    properties:
+                      message:
+                        type: string
+                    required: [message]
+                  - type: object
+                    description: Web authentication flow response
+                    properties:
+                      authUrl:
+                        type: string
+                        format: uri
+                        description: URL to authenticate via web browser
+                      doneUrl:
+                        type: string
+                        format: uri
+                        description: URL to poll for completion of authentication
+                    required: [authUrl, doneUrl]
+              examples:
+                unauthorized:
+                  summary: "No Authorization header provided"
+                  description: |
+                    When no Authorization header is provided or the token is invalid.
+                  value:
+                    message: "Unauthorized"
+                web_auth_flow:
+                  summary: "2FA enabled + npm-otp header omitted (web auth flow)"
+                  description: |
+                    When user has 2FA enabled, omits the `npm-otp` header, and includes both `npm-auth-type=web` and `npm-command=trust` headers.
+                  value:
+                    authUrl: "https://www.npmjs.com/auth/cli/00000000-0000-0000-0000-000000000000"
+                    doneUrl: "https://registry.npmjs.org/-/v1/done?authId=00000000-0000-0000-0000-000000000000"
+        "403":
+          description: 2fa required or insufficient permissions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+              examples:
+                2fa_disabled:
+                  summary: "Please enable 2fa for your account"
+                  value:
+                    message: "Please enable 2fa for your account"
+                insufficient_permissions:
+                  summary: "Insufficient permissions to view configurations"
+                  value:
+                    message: "Insufficient permissions to access trusted publisher configurations for this package"
+        "404":
+          description: Package not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+              examples:
+                package_not_found:
+                  summary: "Package not found"
+                  value:
+                    message: "Package not found"
+    post:
+      tags:
+        - Trust
+      summary: Add trusted publisher configuration for package
+      description: |
+        Configure trusted publisher settings for a package to enable OIDC token exchange.
+
+        This endpoint allows users with write permission to the package to establish trust with CI/CD providers
+        (GitHub Actions, GitLab CI, CircleCI, etc.) so that those services can publish to the package
+        without requiring long-lived npm tokens. The configuration also defines the specific permissions
+        granted to the trusted publisher, controlling what actions it is allowed to perform.
+
+        To allow dist-tag operations, include `manageDistTags` in `permissions`. This permission is
+        opt-in, is not added to existing configurations automatically, and is independent of
+        `createPackage`. For example, `["createStagedPackage", "manageDistTags"]` allows staged
+        publishing and dist-tag management without direct publishing. It applies to all dist-tags
+        for this package; it cannot be restricted to individual tag names. Permissions are granted
+        per configuration, so enabling or disabling this permission does not change other configurations.
+
+        ## Requirements
+        - Package MUST exist
+        - User MUST have write permission to the package
+        - MUST have 2FA enabled on their account
+        - User MUST be authenticated
+        - Granular Access Tokens with `bypass_2fa: true` are **not** permitted
+          to call this endpoint and receive `403 Forbidden`. Configuring
+          trusted publishers requires an interactive 2FA challenge.
+
+      operationId: configureTrustedPublisher
+      parameters:
+        - name: package
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Name of the npm package, url-encoded
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            pattern: "^Bearer .+"
+          description: |
+            Authentication header. Supports both Bearer authentication.
+
+            **Formats:**
+            - `Bearer <token>` - npm access token or granular access token
+
+            **Accepted token types:**
+            - npm access token (traditional user token)
+        - name: npm-otp
+          in: header
+          required: true
+          schema:
+            type: string
+          description: |
+            One-time password for two-factor authentication. Always required for this endpoint.
+
+            When not provided for users with 2FA enabled, the API responds with 2FA polling payload.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OidcConfigsCreate"
+            examples:
+              github:
+                summary: GitHub Actions configuration array
+                value:
+                  - type: "github"
+                    claims:
+                      repository: "my-org/my-package"
+                      workflow_ref:
+                        file: "publish.yml"
+                      environment: "production"
+                    permissions:
+                      - "createPackage"
+                      - "createStagedPackage"
+              github_stage_and_dist_tags:
+                summary: GitHub Actions with staged publishing and dist-tag access
+                value:
+                  - type: "github"
+                    claims:
+                      repository: "my-org/my-package"
+                      workflow_ref:
+                        file: "release.yml"
+                      environment: "production"
+                    permissions:
+                      - "createStagedPackage"
+                      - "manageDistTags"
+              gitlab:
+                summary: GitLab CI configuration array
+                value:
+                  - type: "gitlab"
+                    claims:
+                      project_path: "my-group/my-package"
+                      ci_config_ref_uri:
+                        file: ".gitlab-ci.yml"
+                      environment: "production"
+                    permissions:
+                      - "createPackage"
+                      - "createStagedPackage"
+              circleci:
+                summary: CircleCI configuration array
+                value:
+                  - type: "circleci"
+                    claims:
+                      oidc.circleci.com/org-id: "94b40e60-cfd5-486f-a04b-507abf27a83d"
+                      oidc.circleci.com/project-id: "ff4d0d0d-5033-48c5-81e6-7c14a4715837"
+                      oidc.circleci.com/pipeline-definition-id: "c959a6e7-5b83-4bc1-b46f-37bf13513490"
+                      oidc.circleci.com/context-ids:
+                        - "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                      oidc.circleci.com/vcs-origin: "github.com/myorg/myrepo"
+                    permissions:
+                      - "createPackage"
+                      - "createStagedPackage"
+      security:
+        - npmAccessToken: []
+        - granularAccessToken: []
+      responses:
+        "200":
+          description: "Trusted publisher configuration created successfully"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OidcConfigs"
+              examples:
+                github:
+                  summary: GitHub Actions configuration response
+                  value:
+                    - id: "12345678-1234-1234-1234-123456789abc"
+                      type: "github"
+                      claims:
+                        repository: "my-org/my-package"
+                        workflow_ref:
+                          file: "publish.yml"
+                        environment: "production"
+                      permissions:
+                        - "createPackage"
+                        - "createStagedPackage"
+                gitlab:
+                  summary: GitLab CI configuration response
+                  value:
+                    - id: "87654321-4321-4321-4321-abcdef123456"
+                      type: "gitlab"
+                      claims:
+                        project_path: "my-group/my-package"
+                        ci_config_ref_uri:
+                          file: ".gitlab-ci.yml"
+                        environment: "production"
+                      permissions:
+                        - "createPackage"
+                        - "createStagedPackage"
+                circleci:
+                  summary: CircleCI configuration response
+                  value:
+                    - id: "e792f093-7302-4330-8d50-27d7acddc87e"
+                      type: "circleci"
+                      claims:
+                        oidc.circleci.com/org-id: "94b40e60-cfd5-486f-a04b-507abf27a83d"
+                        oidc.circleci.com/project-id: "ff4d0d0d-5033-48c5-81e6-7c14a4715837"
+                        oidc.circleci.com/pipeline-definition-id: "c959a6e7-5b83-4bc1-b46f-37bf13513490"
+                        oidc.circleci.com/context-ids:
+                          - "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                        oidc.circleci.com/vcs-origin: "github.com/myorg/myrepo"
+                      permissions:
+                        - "createPackage"
+                        - "createStagedPackage"
+        "400":
+          description: Bad request body
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+              examples:
+                invalid_config:
+                  summary: "Invalid trusted publisher configuration"
+                  value:
+                    message: "Invalid trusted publisher configuration"
+        "401":
+          description: Unauthorized - missing or invalid authentication / OTP
+          headers:
+            npm-notice:
+              description: |
+                Notice header sent when 2FA is enabled and web auth headers are not present.
+                Contains URL for WebAuthn security key authentication.
+              schema:
+                type: string
+              example: "Open https://www.npmjs.com/login/<uuid> to use your security key for authentication"
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    description: Error response for missing authentication or OTP
+                    properties:
+                      message:
+                        type: string
+                    required: [message]
+                  - type: object
+                    description: Web authentication flow response
+                    properties:
+                      authUrl:
+                        type: string
+                        format: uri
+                        description: URL to authenticate via web browser
+                      doneUrl:
+                        type: string
+                        format: uri
+                        description: URL to poll for completion of authentication
+                    required: [authUrl, doneUrl]
+              examples:
+                unauthorized:
+                  summary: "No Authorization header provided"
+                  description: |
+                    When no Authorization header is provided or the token is invalid.
+                  value:
+                    message: "Unauthorized"
+                web_auth_flow:
+                  summary: "2FA enabled + npm-otp header omitted (web auth flow)"
+                  description: |
+                    When user has 2FA enabled, omits the `npm-otp` header, and includes both `npm-auth-type=web` and `npm-command=trust` headers.
+                  value:
+                    authUrl: "https://www.npmjs.com/auth/cli/00000000-0000-0000-0000-000000000000"
+                    doneUrl: "https://registry.npmjs.org/-/v1/done?authId=00000000-0000-0000-0000-000000000000"
+        "403":
+          description: 2fa required, insufficient permissions, or bypass-2FA GAT
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+              examples:
+                2fa_disabled:
+                  summary: "Please enable 2fa for your account"
+                  value:
+                    message: "Please enable 2fa for your account"
+                bypass_2fa_gat:
+                  summary: "Bypass-2FA Granular Access Token not permitted"
+                  value:
+                    error: "Granular access tokens that bypass two-factor authentication may not perform this action. For more info, visit: https://gh.io/npm-gat-bypass2fa-deprecation"
+        "404":
+          description: Package not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+              examples:
+                package_not_found:
+                  summary: "Package not found"
+                  value:
+                    message: "Package not found"
+        "409":
+          description: Conflict - Configuration already exists
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+              examples:
+                config_limit_reached:
+                  summary: "Config already exists"
+                  value:
+                    message: "trusted publisher config already exists for the package. Please delete and re-create."
+  /-/package/{package}/trust/{config-uuid}:
+    delete:
+      tags:
+        - Trust
+      summary: Delete trusted publisher configuration
+      description: |
+        Delete a specific trusted publisher configuration for a package by its UUID.
+
+        This endpoint allows users with write permission to the package to remove an existing trusted publisher
+        configuration that was previously set up for OIDC token exchange.
+
+        ## Requirements
+        - Package MUST exist
+        - User MUST have write permission to the package
+        - MUST have 2FA enabled on their account
+        - User MUST be authenticated
+        - Granular Access Tokens with `bypass_2fa: true` are **not** permitted
+          to call this endpoint and receive `403 Forbidden`. Deleting a
+          trusted publisher configuration requires an interactive 2FA
+          challenge.
+
+      operationId: deleteTrustedPublisher
+      parameters:
+        - name: package
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Name of the npm package, url-encoded
+        - name: config-uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID of the trusted publisher configuration to delete
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            pattern: "^Bearer .+"
+          description: |
+            Authentication header. Supports both Bearer authentication.
+
+            **Formats:**
+            - `Bearer <token>` - npm access token or granular access token
+
+            **Accepted token types:**
+            - npm access token (traditional user token)
+        - name: npm-otp
+          in: header
+          required: true
+          schema:
+            type: string
+          description: |
+            One-time password for two-factor authentication. Always required for this endpoint.
+
+            When not provided for users with 2FA enabled, the API responds with 2FA polling payload.
+      security:
+        - npmAccessToken: []
+        - granularAccessToken: []
+      responses:
+        "204":
+          description: "Trusted publisher configuration deleted successfully"
+          content: {}
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+              examples:
+                invalid_uuid:
+                  summary: "Invalid UUID format"
+                  value:
+                    message: "Invalid trusted publisher config id format"
+        "401":
+          description: Unauthorized - missing or invalid authentication / OTP
+          headers:
+            npm-notice:
+              description: |
+                Notice header sent when 2FA is enabled and web auth headers are not present.
+                Contains URL for WebAuthn security key authentication.
+              schema:
+                type: string
+              example: "Open https://www.npmjs.com/login/<uuid> to use your security key for authentication"
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    description: Error response for missing authentication or OTP
+                    properties:
+                      message:
+                        type: string
+                    required: [message]
+                  - type: object
+                    description: Web authentication flow response
+                    properties:
+                      authUrl:
+                        type: string
+                        format: uri
+                        description: URL to authenticate via web browser
+                      doneUrl:
+                        type: string
+                        format: uri
+                        description: URL to poll for completion of authentication
+                    required: [authUrl, doneUrl]
+              examples:
+                unauthorized:
+                  summary: "No Authorization header provided"
+                  description: |
+                    When no Authorization header is provided or the token is invalid.
+                  value:
+                    message: "Unauthorized"
+                web_auth_flow:
+                  summary: "2FA enabled + npm-otp header omitted (web auth flow)"
+                  description: |
+                    When user has 2FA enabled, omits the `npm-otp` header, and includes both `npm-auth-type=web` and `npm-command=trust` headers.
+                  value:
+                    authUrl: "https://www.npmjs.com/auth/cli/00000000-0000-0000-0000-000000000000"
+                    doneUrl: "https://registry.npmjs.org/-/v1/done?authId=00000000-0000-0000-0000-000000000000"
+        "403":
+          description: 2fa required, insufficient permissions, or bypass-2FA GAT
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  error:
+                    type: string
+              examples:
+                2fa_disabled:
+                  summary: "Please enable 2fa for your account"
+                  value:
+                    message: "Please enable 2fa for your account"
+                insufficient_permissions:
+                  summary: "Insufficient permissions to delete configuration"
+                  value:
+                    message: "Insufficient permissions to access trusted publisher config for the package"
+                bypass_2fa_gat:
+                  summary: "Bypass-2FA Granular Access Token not permitted"
+                  value:
+                    error: "Granular access tokens that bypass two-factor authentication may not perform this action. For more info, visit: https://gh.io/npm-gat-bypass2fa-deprecation"
+        "404":
+          description: Package or configuration not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+              examples:
+                package_not_found:
+                  summary: "Package not found"
+                  value:
+                    message: "Package not found"
+                config_not_found:
+                  summary: "Configuration not found"
+                  value:
+                    message: "Trusted publisher configuration not found for the package"
+
+components:
+  schemas:
+    OidcConfigs:
+      type: array
+      description: Array of OIDC trusted publisher configurations
+      items:
+        oneOf:
+          - $ref: "#/components/schemas/GitHubActionsConfig"
+          - $ref: "#/components/schemas/GitLabPipelinesConfig"
+          - $ref: "#/components/schemas/CircleCIConfig"
+
+    OidcConfigsCreate:
+      type: array
+      description: Array of OIDC trusted publisher configurations to create
+      items:
+        oneOf:
+          - $ref: "#/components/schemas/GitHubActionsConfigCreate"
+          - $ref: "#/components/schemas/GitLabPipelinesConfigCreate"
+          - $ref: "#/components/schemas/CircleCIConfigCreate"
+
+    GitHubActionsConfig:
+      type: object
+      required:
+        - id
+        - type
+        - claims
+        - permissions
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier for the configuration
+        type:
+          type: string
+          enum:
+            - github
+          description: Type of the trusted publisher
+        claims:
+          type: object
+          required:
+            - repository
+          properties:
+            repository:
+              type: string
+              description: GitHub repository in format 'owner/repo'
+              example: my-org/my-package
+            workflow_ref:
+              oneOf:
+                - type: string
+                  description: Exact workflow reference
+                - type: object
+                  description: Partial workflow reference match
+                  properties:
+                    file:
+                      type: string
+                      description: Workflow file name (e.g., 'publish.yml')
+              description: Reference to the GitHub Actions workflow
+            environment:
+              type: string
+              description: GitHub environment name
+              example: production
+        permissions:
+          type: array
+          items:
+            type: string
+            enum:
+              - createPackage
+              - createStagedPackage
+              - manageDistTags
+          description: List of permissions granted to the trusted publisher configuration
+          example: ["createPackage", "createStagedPackage"]
+
+    GitHubActionsConfigCreate:
+      type: object
+      required:
+        - type
+        - claims
+        - permissions
+      properties:
+        type:
+          type: string
+          enum:
+            - github
+          description: Type of the trusted publisher
+        claims:
+          type: object
+          required:
+            - repository
+          properties:
+            repository:
+              type: string
+              description: GitHub repository in format 'owner/repo'
+              example: my-org/my-package
+            workflow_ref:
+              oneOf:
+                - type: string
+                  description: Exact workflow reference
+                - type: object
+                  description: Partial workflow reference match
+                  properties:
+                    file:
+                      type: string
+                      description: Workflow file name (e.g., 'publish.yml')
+              description: Reference to the GitHub Actions workflow
+            environment:
+              type: string
+              description: GitHub environment name
+              example: production
+        permissions:
+          type: array
+          items:
+            type: string
+            enum:
+              - createPackage
+              - createStagedPackage
+              - manageDistTags
+          description: List of permissions granted to the trusted publisher configuration
+          example: ["createPackage", "createStagedPackage"]
+
+    GitLabPipelinesConfig:
+      type: object
+      required:
+        - id
+        - type
+        - claims
+        - permissions
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier for the configuration
+        type:
+          type: string
+          enum:
+            - gitlab
+          description: Type of the trusted publisher
+        claims:
+          type: object
+          required:
+            - project_path
+          properties:
+            project_path:
+              type: string
+              description: GitLab project path in format 'group/project'
+              example: my-group/my-package
+            ci_config_ref_uri:
+              oneOf:
+                - type: string
+                  description: Exact CI config reference
+                - type: object
+                  description: Partial CI config reference match
+                  properties:
+                    file:
+                      type: string
+                      description: CI configuration file name (e.g., '.gitlab-ci.yml')
+              description: Reference to the GitLab CI configuration
+            environment:
+              type: string
+              description: GitLab environment name
+              example: production
+        permissions:
+          type: array
+          items:
+            type: string
+            enum:
+              - createPackage
+              - createStagedPackage
+              - manageDistTags
+          description: List of permissions granted to the trusted publisher configuration
+          example: ["createPackage", "createStagedPackage"]
+
+    CircleCIConfig:
+      type: object
+      required:
+        - id
+        - type
+        - claims
+        - permissions
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier for the configuration
+        type:
+          type: string
+          enum:
+            - circleci
+          description: Type of the trusted publisher
+        claims:
+          type: object
+          required:
+            - oidc.circleci.com/org-id
+            - oidc.circleci.com/project-id
+            - oidc.circleci.com/pipeline-definition-id
+            - oidc.circleci.com/vcs-origin
+          properties:
+            oidc.circleci.com/org-id:
+              type: string
+              format: uuid
+              description: The UUID of the CircleCI organization
+              example: "94b40e60-cfd5-486f-a04b-507abf27a83d"
+            oidc.circleci.com/project-id:
+              type: string
+              format: uuid
+              description: The UUID of the CircleCI project
+              example: "ff4d0d0d-5033-48c5-81e6-7c14a4715837"
+            oidc.circleci.com/pipeline-definition-id:
+              type: string
+              format: uuid
+              description: The UUID of the pipeline definition Id
+              example: "c959a6e7-5b83-4bc1-b46f-37bf13513490"
+            oidc.circleci.com/context-ids:
+              type: array
+              items:
+                type: string
+                format: uuid
+              description: Optional array of CircleCI context UUIDs.
+              example:
+                - "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            oidc.circleci.com/vcs-origin:
+              type: string
+              description: |
+                The origin repository where the CI job runs, in the format `<vcs-provider>/<org>/<repo>`.
+              example: "github.com/myorg/myrepo"
+        permissions:
+          type: array
+          items:
+            type: string
+            enum:
+              - createPackage
+              - createStagedPackage
+              - manageDistTags
+          description: List of permissions granted to the trusted publisher configuration
+          example: ["createPackage", "createStagedPackage"]
+
+    GitLabPipelinesConfigCreate:
+      type: object
+      required:
+        - type
+        - claims
+        - permissions
+      properties:
+        type:
+          type: string
+          enum:
+            - gitlab
+          description: Type of the trusted publisher
+        claims:
+          type: object
+          required:
+            - project_path
+          properties:
+            project_path:
+              type: string
+              description: GitLab project path in format 'group/project'
+              example: my-group/my-package
+            ci_config_ref_uri:
+              oneOf:
+                - type: string
+                  description: Exact CI config reference
+                - type: object
+                  description: Partial CI config reference match
+                  properties:
+                    file:
+                      type: string
+                      description: CI configuration file name (e.g., '.gitlab-ci.yml')
+              description: Reference to the GitLab CI configuration
+            environment:
+              type: string
+              description: GitLab environment name
+              example: production
+        permissions:
+          type: array
+          items:
+            type: string
+            enum:
+              - createPackage
+              - createStagedPackage
+              - manageDistTags
+          description: List of permissions granted to the trusted publisher configuration
+          example: ["createPackage", "createStagedPackage"]
+
+    CircleCIConfigCreate:
+      type: object
+      required:
+        - type
+        - claims
+        - permissions
+      properties:
+        type:
+          type: string
+          enum:
+            - circleci
+          description: Type of the trusted publisher
+        claims:
+          type: object
+          required:
+            - oidc.circleci.com/org-id
+            - oidc.circleci.com/project-id
+            - oidc.circleci.com/pipeline-definition-id
+            - oidc.circleci.com/vcs-origin
+          properties:
+            oidc.circleci.com/org-id:
+              type: string
+              format: uuid
+              description: The UUID of the CircleCI organization
+              example: "94b40e60-cfd5-486f-a04b-507abf27a83d"
+            oidc.circleci.com/project-id:
+              type: string
+              format: uuid
+              description: The UUID of the CircleCI project
+              example: "ff4d0d0d-5033-48c5-81e6-7c14a4715837"
+            oidc.circleci.com/pipeline-definition-id:
+              type: string
+              format: uuid
+              description: The UUID of the pipeline definition Id
+              example: "c959a6e7-5b83-4bc1-b46f-37bf13513490"
+            oidc.circleci.com/context-ids:
+              type: array
+              items:
+                type: string
+                format: uuid
+              description: Optional array of CircleCI context UUIDs.
+              example:
+                - "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            oidc.circleci.com/vcs-origin:
+              type: string
+              description: |
+                The origin repository where the CI job runs, in the format `<vcs-provider>/<org>/<repo>`.
+              example: "github.com/myorg/myrepo"
+        permissions:
+          type: array
+          items:
+            type: string
+            enum:
+              - createPackage
+              - createStagedPackage
+              - manageDistTags
+          description: List of permissions granted to the trusted publisher configuration
+          example: ["createPackage", "createStagedPackage"]
